@@ -16,7 +16,14 @@
 
     Stages:
         fade in -> photo -> title -> katana strike (half way) -> loading
-        -> final thrust at 100% -> blood covers the screen -> fade out
+        -> final thrust at 100% -> blood floods the screen -> fade out
+
+    The katana and all blood are drawn from four PNG textures (the assets/
+    folder next to this script). An executor downloads them once, keeps them
+    in its workspace and reuses them on later runs; the script yields while
+    that happens. See CONFIG.Textures to host them elsewhere or to use images
+    uploaded to Roblox. Without textures the intro still runs, with simple
+    shapes instead.
 ]]
 
 local OVERRIDES = ...
@@ -62,7 +69,7 @@ local CONFIG = {
         FinalHold    = 0.5,   -- pause at 100% before the final thrust
         FinalWindup  = 0.28,
         FinalThrust  = 0.11,
-        BloodCover   = 2.6,   -- time for blood to cover the whole screen
+        BloodCover   = 1.6,   -- time for blood to flood the whole screen
         EndHold      = 0.4,
         FadeToBlack  = 0.7,
         FadeOut      = 0.8,
@@ -82,16 +89,17 @@ local CONFIG = {
     },
 
     Blood = {
-        SplashCount      = 38,
+        SplashCount      = 38,   -- droplets thrown by the first strike
         FinalSplashCount = 90,
-        ImpactStains     = 5,
-        MaxStains        = 11,   -- stains on the "lens" while loading
-        FinalStains      = 14,
+        ImpactStains     = 4,    -- blots that land on the "lens" at the strike
+        MaxStains        = 9,    -- lens blots in total while loading
+        FinalStains      = 6,
         MaxDrips         = 11,   -- drips running down the letters
         DripSpeed        = { 7, 16 },
-        CoverColumns     = 15,
-        CoverBlobs       = 8,
-        PoolSize         = 130,  -- pooled droplet / spark frames
+        CoverBlots       = 15,   -- big blots that flood the screen at the end
+        CoverColumns     = 15,   -- (shape fallback only)
+        CoverBlobs       = 8,    -- (shape fallback only)
+        PoolSize         = 130,  -- pooled flying droplets
     },
 
     Atmosphere = {
@@ -105,6 +113,18 @@ local CONFIG = {
 
     -- Optional sound ids ("rbxassetid://..."); empty = silent
     Sounds = { Thud = "", Whoosh = "", Impact = "", Final = "", Volume = 0.6 },
+
+    -- Katana and blood textures
+    Textures = {
+        Enabled = true,          -- false: always use the simple shapes
+        BaseUrl = "https://raw.githubusercontent.com/violpru01-art/lul/HEAD/assets/",
+        Folder  = "ZeroIntro",   -- cache folder inside the executor workspace
+        Version = 1,             -- change after replacing the files to force a new download
+        Timeout = 10,            -- seconds to wait for downloads before falling back to shapes
+        Files   = { Katana = "zero_katana.png", BlotsA = "zero_blots_a.png", BlotsB = "zero_blots_b.png", BloodFx = "zero_blood_fx.png" },
+        -- Images uploaded to Roblox take priority over downloads, e.g. Ids = { Katana = "rbxassetid://123" }
+        Ids     = {},
+    },
 
     Colors = {
         BgTop       = Color3.fromRGB(13, 5, 7),
@@ -343,6 +363,111 @@ local function layer(z, name)
     return frame({ Name = name, Size = UDim2.fromScale(1, 1), ZIndex = z, Parent = gui })
 end
 
+-- Black curtain first: it hides everything while textures load and the scene is built.
+ui.fade = frame({ Name = "Fade", Size = UDim2.fromScale(1, 1), BackgroundColor3 = BLACK, BackgroundTransparency = 1, ZIndex = 13, Parent = gui })
+tween(ui.fade, 0.35, { BackgroundTransparency = 0 }, ES.Quad)
+
+----------------------------------------------------------------------
+-- 5. TEXTURES (katana + blood; downloaded once, then read from the cache)
+----------------------------------------------------------------------
+local TEX = {}
+do
+    local cfg = CONFIG.Textures
+    local toAsset = getcustomasset or getsynasset
+    local canCache = toAsset ~= nil and writefile ~= nil and isfile ~= nil
+
+    local function httpGet(url)
+        local ok, body = pcall(function() return game:HttpGet(url) end)
+        if ok and typeof(body) == "string" then return body end
+        local send = request or http_request or (syn and syn.request)
+        if send then
+            local res = send({ Url = url, Method = "GET" })
+            if typeof(res) == "table" and res.StatusCode == 200 then return res.Body end
+        end
+        return nil
+    end
+
+    local function resolve(key, file)
+        local id = cfg.Ids[key]
+        if typeof(id) == "string" and id ~= "" then return id end      -- image uploaded to Roblox
+        if not canCache then return nil end
+        local path = cfg.Folder .. "/v" .. tostring(cfg.Version) .. "_" .. file
+        if not isfile(path) then
+            if makefolder then pcall(makefolder, cfg.Folder) end
+            local data = httpGet(cfg.BaseUrl .. file)
+            -- an error page must never end up in the cache as a "texture"
+            if typeof(data) ~= "string" or #data < 1024 or data:sub(2, 4) ~= "PNG" then return nil end
+            writefile(path, data)
+        end
+        return toAsset(path)
+    end
+
+    if cfg.Enabled then
+        local found, pending, open = {}, 0, true
+        for key, file in pairs(cfg.Files) do
+            pending += 1
+            task.spawn(function()
+                local ok, asset = pcall(resolve, key, file)
+                if open and ok and typeof(asset) == "string" and asset ~= "" then found[key] = asset end
+                pending -= 1
+            end)
+        end
+        -- a pulsing kanji shows the script is alive if the first download is slow
+        local started, deadline = os.clock(), os.clock() + cfg.Timeout
+        local sign
+        while pending > 0 and os.clock() < deadline do
+            if not sign and os.clock() - started > 0.6 then
+                sign = label({ AnchorPoint = CENTER, Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(80, 80), Text = CONFIG.Kanji, TextSize = 44, Font = FONT.Kanji, TextColor3 = COL.Blood, TextTransparency = 1, Parent = ui.fade })
+                loopTween(sign, 0.9, { TextTransparency = 0.25 }, ES.Sine, true)
+            end
+            task.wait()
+        end
+        open = false                                       -- a late download only fills the cache for next time
+        if sign then sign:Destroy() end
+        for key, asset in pairs(found) do TEX[key] = asset end
+
+        local list = {}
+        for _, asset in pairs(TEX) do list[#list + 1] = asset end
+        if #list > 0 then                                  -- decode before the first frame that shows them
+            local done = false
+            task.spawn(function()
+                pcall(function() game:GetService("ContentProvider"):PreloadAsync(list) end)
+                done = true
+            end)
+            local limit = os.clock() + 3
+            while not done and os.clock() < limit do task.wait() end
+        end
+        if #list < 4 then warn("[ZeroIntro] textures unavailable (" .. #list .. "/4 loaded), missing parts use simple shapes") end
+    end
+end
+local HAS_KATANA = TEX.Katana ~= nil
+local HAS_BLOOD = TEX.BlotsA ~= nil and TEX.BlotsB ~= nil and TEX.BloodFx ~= nil
+
+-- Sprite rectangles inside the atlases: { texture, x, y, width, height } (see tools/gen_blood.py).
+local ATLAS = {
+    blots  = {},                                   -- 8 impact blots, 512 px cells
+    spray  = { "BloodFx", 0, 0, 512, 512 },        -- droplets thrown all around a point
+    cone   = { "BloodFx", 512, 0, 512, 512 },      -- droplets flying along +X from the left edge
+    streak = { "BloodFx", 256, 512, 256, 128 },    -- one flying drop, head on the right
+    bleed  = { "BloodFx", 512, 512, 512, 512 },    -- soft soaking blot
+    blade  = { "Katana", 0, 0, 1024, 128 },
+    coat   = { "Katana", 0, 128, 1024, 128 },      -- blood lying on the blade
+    hilt   = { "Katana", 0, 256, 512, 256 },
+}
+for i = 0, 7 do
+    ATLAS.blots[i + 1] = { (i < 4) and "BlotsA" or "BlotsB", (i % 2) * 512, (math.floor(i / 2) % 2) * 512, 512, 512 }
+end
+local DRIP_TRAIL, DRIP_BEAD = 384, 128             -- a drip column: 64 px wide, trail rows then the hanging bead
+
+local function sprite(def, props)
+    props.BackgroundTransparency = 1
+    props.BorderSizePixel = 0
+    props.Image = TEX[def[1]]
+    props.ImageRectOffset = Vector2.new(def[2], def[3])
+    props.ImageRectSize = Vector2.new(def[4], def[5])
+    return make("ImageLabel", props)
+end
+
 ----------------------------------------------------------------------
 -- 5. SCHEDULER (scene clock: honours Speed, hit-stop and cleanup)
 ----------------------------------------------------------------------
@@ -477,7 +602,6 @@ do
 
     ui.flashRed   = frame({ Size = UDim2.fromScale(1, 1), BackgroundColor3 = COL.BloodBright, BackgroundTransparency = 1, ZIndex = 11, Parent = gui })
     ui.flashWhite = frame({ Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 1, ZIndex = 12, Parent = gui })
-    ui.fade       = frame({ Size = UDim2.fromScale(1, 1), BackgroundColor3 = BLACK, BackgroundTransparency = 1, ZIndex = 13, Parent = gui })
     ui.skip       = make("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 14, Parent = gui })
 end
 
@@ -677,10 +801,95 @@ do
 end
 
 ----------------------------------------------------------------------
--- 9. SCENE: KATANA (built from frames; tip on the leading side)
+-- 9. SCENE: KATANA (textured sprite; built from frames when the texture is missing)
 ----------------------------------------------------------------------
-local KATANA = { overlays = {}, tipRows = {}, streaks = {}, tassel = { a = 0, w = 0, b = 0, v = 0, goal = 0, live = false } }
-do
+local KATANA = { overlays = {}, tipRows = {}, streaks = {}, tipX = 0, tassel = { a = 0, w = 0, b = 0, v = 0, goal = 0, live = false } }
+
+-- Tassel: two-link pendulum hanging from the pommel
+local function buildTassel(parent, position)
+    local ts = KATANA.tassel
+    ts.pivot = frame({ AnchorPoint = CENTER, Position = position, Size = UDim2.fromOffset(2, 2), ZIndex = 1, Parent = parent })
+    local cord = frame({ AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(2, 26), BackgroundColor3 = COL.Blood, Parent = ts.pivot })
+    ts.pivot2 = frame({ AnchorPoint = CENTER, Position = UDim2.fromScale(0.5, 1), Size = UDim2.fromOffset(2, 2), Parent = cord })
+    corner(frame({ AnchorPoint = CENTER, Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(7, 7), BackgroundColor3 = COL.BrassHi, ZIndex = 2, Parent = ts.pivot2 }))
+    local tuft = corner(frame({ AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(7, 24), BackgroundColor3 = COL.BloodBright, Parent = ts.pivot2 }), 0, 2)
+    gradient(tuft, 90, nil, nseq({ 0, 0, 0.6, 0.1, 1, 0.75 }))
+end
+
+-- Texture layout (tools/gen_katana.py): tip at (8, 34), spine y = 34 + 16 * (1 - u^2) with
+-- u = (x - 512) / 504, blade 22..30 px wide, base at x = 1016; the hilt is a separate cell.
+local function buildKatanaTextured()
+    local bladeLen = math.max(KAT.BladeLength, TITLE.width + 80)
+    local k = bladeLen / 1008                              -- texture pixels -> reference pixels
+    local W, H = 1024 * k, 128 * k
+    KATANA.bladeLen, KATANA.bladeH, KATANA.tipLen = bladeLen, 26 * k, 82 * k
+
+    local root = frame({ Name = "Katana", AnchorPoint = CENTER, Position = P(0, 0), Size = UDim2.fromOffset(W, H), ZIndex = 12, Visible = false, Parent = stage })
+    KATANA.root = root
+    sprite(ATLAS.blade, { Size = UDim2.fromScale(1, 1), ZIndex = 2, Parent = root })
+    local coat = sprite(ATLAS.coat, { Size = UDim2.fromOffset(0, H), ZIndex = 3, Visible = false, Parent = root })
+    local hiltTilt = -math.deg(math.atan(32 / 504))        -- the handle continues the curve of the blade
+    local hilt = sprite(ATLAS.hilt, { AnchorPoint = Vector2.new(16 / 512, 0.5), Position = UDim2.fromOffset(1016 * k, 49 * k), Size = UDim2.fromOffset(512 * k, 256 * k), Rotation = hiltTilt, ZIndex = 4, Parent = root })
+    KATANA.hiltRot = hiltTilt
+    buildTassel(hilt, UDim2.fromScale(431 / 512, 0.5 + 16 / 256))
+
+    for i = 1, 3 do                                        -- motion streaks trailing behind the sword
+        local len = bladeLen * 0.65 + 430 * k + 220 + i * 120
+        local st = frame({ Position = UDim2.fromOffset(W * 0.35, 62 * k + (i - 2) * 7 - 2), Size = UDim2.fromOffset(len, (i == 2) and 3 or 1.5), BackgroundColor3 = (i == 2) and COL.Bone or COL.BloodBright, BackgroundTransparency = 1, ZIndex = 1, Parent = root })
+        gradient(st, 0, nil, nseq({ 0, 1, 0.2, 0.15, 1, 1 }))
+        KATANA.streaks[i] = st
+    end
+
+    local glint = frame({ AnchorPoint = CENTER, Size = UDim2.fromOffset(110, 22 * k), BackgroundColor3 = WHITE, BackgroundTransparency = 1, ZIndex = 5, Parent = root })
+    gradient(glint, 0, nil, nseq({ 0, 1, 0.5, 0.1, 1, 1 }))
+    function KATANA.glint(duration)                        -- light sliding from the collar to the tip
+        animate(duration, function(a)
+            local x = 8 + 1008 * lerp(0.94, 0.14, a)
+            local u = (x - 512) / 504
+            glint.Position = UDim2.fromOffset(x * k, (34 + 16 * (1 - u * u) + 14) * k)
+            glint.Rotation = -math.deg(32 * u / 504)
+            glint.BackgroundTransparency = 1 - 0.5 * math.sin(a * math.pi)
+        end)
+    end
+
+    -- From the left the sprite is turned upside down instead of mirrored (edge up, as a katana is worn).
+    local baseRot = FROM_RIGHT and 0 or 180
+    local vx, vy = SX * (W / 2 - 8 * k), SX * (H / 2 - 34 * k)
+    local yBias = -SX * 14 * k                             -- the middle of the blade, not its tip, runs through the letters
+    function KATANA.setPose(tipX, tipY, tilt, pivotDist)
+        local rot = tilt * SX
+        local r = math.rad(rot)
+        local c, s = math.cos(r), math.sin(r)
+        local tx = tipX + SX * pivotDist - SX * pivotDist * c
+        local ty = tipY + yBias - SX * pivotDist * s
+        root.Position = P(tx + vx * c - vy * s, ty + vx * s + vy * c)
+        root.Rotation = rot + baseRot
+        S.katRot = rot + baseRot
+        KATANA.tipX = tipX
+    end
+
+    -- Lower outline of the blade, relative to BLADE_Y, `dist` behind the tip.
+    function KATANA.lowerY(dist)
+        local u = clamp((8 + dist / k - 512) / 504, -1, 1)
+        local sag = 16 * (1 - u * u)
+        return (FROM_RIGHT and (sag + 12) or (14 - sag)) * k
+    end
+
+    -- Coat the leading `fraction` of the blade in blood (cropping instead of clipping: clips break under rotation).
+    local coated = 0
+    function KATANA.setBlood(fraction)
+        local from = coated
+        coated = fraction
+        coat.Visible = true
+        animate(0.3, function(a)
+            local f = lerp(from, fraction, a)
+            coat.Size = UDim2.fromOffset(W * f, H)
+            coat.ImageRectSize = Vector2.new(1024 * f, 128)
+        end)
+    end
+end
+
+local function buildKatanaShapes()
     local bladeLen  = math.max(KAT.BladeLength, TITLE.width + 80)
     local bladeH    = KAT.BladeWidth
     local tipLen    = bladeH * 3.1
@@ -785,14 +994,7 @@ do
     corner(hpart(38 + handleLen - 1, 13, 22, COL.Steel, 3), 0, 4)
     hpart(38 + handleLen + 2, 2, 22, COL.BloodBright, 4)
 
-    -- Tassel: two-link pendulum hanging from the pommel
-    local ts = KATANA.tassel
-    ts.pivot = frame({ AnchorPoint = CENTER, Position = UDim2.fromOffset(mcx(hiltLen, 38 + handleLen + 6), mid + 9), Size = UDim2.fromOffset(2, 2), ZIndex = 1, Parent = hilt })
-    local cord = frame({ AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(2, 26), BackgroundColor3 = COL.Blood, Parent = ts.pivot })
-    ts.pivot2 = frame({ AnchorPoint = CENTER, Position = UDim2.fromScale(0.5, 1), Size = UDim2.fromOffset(2, 2), Parent = cord })
-    corner(frame({ AnchorPoint = CENTER, Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(7, 7), BackgroundColor3 = COL.BrassHi, ZIndex = 2, Parent = ts.pivot2 }))
-    local tuft = corner(frame({ AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(7, 24), BackgroundColor3 = COL.BloodBright, Parent = ts.pivot2 }), 0, 2)
-    gradient(tuft, 90, nil, nseq({ 0, 0, 0.6, 0.1, 1, 0.75 }))
+    buildTassel(hilt, UDim2.fromOffset(mcx(hiltLen, 38 + handleLen + 6), mid + 9))
 
     -- Motion streaks trailing behind the sword while it flies
     for i = 1, 3 do
@@ -800,9 +1002,6 @@ do
         local st = slab(root, W, pad + bladeLen * 0.35, y0 + (i - 2) * 7 - 2, len, (i == 2) and 3 or 1.5, (i == 2) and COL.Bone or COL.BloodBright, 1, 1)
         gradient(st, mgrad(0), nil, nseq({ 0, 1, 0.2, 0.15, 1, 1 }))
         KATANA.streaks[i] = st
-    end
-    function KATANA.setStreaks(a)
-        for i, st in ipairs(KATANA.streaks) do st.BackgroundTransparency = 1 - a * ((i == 2) and 0.75 or 0.5) end
     end
 
     -- Light glint that slides along the blade (u: 0 = tip, 1 = collar)
@@ -829,6 +1028,10 @@ do
         root.Position = P(tx + vx * c - vy * s, ty + vx * s + vy * c)
         root.Rotation = rot
         S.katRot = rot
+        KATANA.tipX = tipX
+    end
+    function KATANA.lowerY()
+        return bladeH * 0.35
     end
 
     -- Coat the leading `fraction` of the blade in blood.
@@ -841,8 +1044,15 @@ do
             if (i - 0.5) / nSeg <= fraction then tween(ov, 0.25, { BackgroundTransparency = 0.2 }, ES.Quad) end
         end
     end
+end
 
-    -- Where the blade meets the title
+if HAS_KATANA then buildKatanaTextured() else buildKatanaShapes() end
+
+function KATANA.setStreaks(a)
+    for i, st in ipairs(KATANA.streaks) do st.BackgroundTransparency = 1 - a * ((i == 2) and 0.75 or 0.5) end
+end
+
+do  -- where the blade meets the title
     local n = #TITLE.letters
     local order = {}                             -- letters in the order the blade reaches them
     for i = 1, n do order[i] = TITLE.letters[FROM_RIGHT and (n - i + 1) or i] end
@@ -854,7 +1064,7 @@ do
     KATANA.exitX = last.x - SX * last.w * 0.44
     local nextL = order[half + 1]
     KATANA.halfTipX = nextL and (nextL.x + SX * nextL.w * 0.08) or (first.x - SX * first.w * 0.15)
-    KATANA.fullTipX = KATANA.entryX + SX * (4 - bladeLen)
+    KATANA.fullTipX = KATANA.entryX + SX * (4 - KATANA.bladeLen)
 end
 
 ----------------------------------------------------------------------
@@ -915,21 +1125,27 @@ ui.fx     = frame({ Name = "Fx", Size = UDim2.fromScale(1, 1), ZIndex = 22, Pare
 ui.impact = frame({ Name = "Impact", Size = UDim2.fromScale(1, 1), ZIndex = 24, Parent = stage })
 
 ----------------------------------------------------------------------
--- 11. EFFECTS: pooled droplets / sparks
+-- 11. EFFECTS: pooled flying droplets / sparks
 ----------------------------------------------------------------------
-local FX = { pool = {}, live = {} }
-for _ = 1, BLOOD.PoolSize do
+local FX = { pool = {}, bloodPool = {}, live = {} }
+for _ = 1, (HAS_BLOOD and 56 or BLOOD.PoolSize) do            -- plain frames: sparks, dust, embers
     FX.pool[#FX.pool + 1] = corner(frame({ AnchorPoint = CENTER, Size = UDim2.fromOffset(4, 4), BackgroundColor3 = COL.Blood, BackgroundTransparency = 0, Visible = false, Parent = ui.fx }))
 end
+if HAS_BLOOD then
+    for _ = 1, BLOOD.PoolSize do                               -- textured drops of blood
+        FX.bloodPool[#FX.bloodPool + 1] = sprite(ATLAS.streak, { AnchorPoint = CENTER, Size = UDim2.fromOffset(8, 4), Visible = false, Parent = ui.fx })
+    end
+end
 
--- Spawns a droplet at stage coordinates. o = { size, life, color, gravity, drag, stretch, alpha }
+-- Spawns a droplet at stage coordinates. o = { size, life, color, gravity, drag, stretch, alpha }; no color = blood.
 function FX.emit(x, y, vx, vy, o)
-    local f = table.remove(FX.pool)
+    local textured = HAS_BLOOD and o.color == nil
+    local f = table.remove(textured and FX.bloodPool or FX.pool)
     if not f then return end
-    f.BackgroundColor3 = o.color or pick(SHADES)
+    if not textured then f.BackgroundColor3 = o.color or pick(SHADES) end
     f.Visible = true
     FX.live[#FX.live + 1] = {
-        f = f, x = x, y = y, vx = vx, vy = vy, t = 0,
+        f = f, textured = textured, x = x, y = y, vx = vx, vy = vy, t = 0,
         size = o.size or 4, life = o.life or 0.8, g = o.gravity or 900, drag = o.drag or 1,
         stretch = o.stretch or 0.01, alpha = o.alpha or 1,
     }
@@ -943,7 +1159,8 @@ function FX.update(dt)
         p.t += dt
         if p.t >= p.life or math.abs(p.x) > limitX or p.y > limitY then
             p.f.Visible = false
-            FX.pool[#FX.pool + 1] = p.f
+            local pool = p.textured and FX.bloodPool or FX.pool
+            pool[#pool + 1] = p.f
             live[i] = live[#live]
             live[#live] = nil
         else
@@ -955,11 +1172,19 @@ function FX.update(dt)
             local k = p.t / p.life
             local speed = math.sqrt(p.vx * p.vx + p.vy * p.vy)
             local thick = p.size * (1 - 0.45 * k)
+            local len = thick * (1 + speed * p.stretch)
+            local fade = 1 - p.alpha * ((k > 0.7) and (1 - k) / 0.3 or 1)
             local f = p.f
             f.Position = P(p.x, p.y)
-            f.Size = UDim2.fromOffset(thick * (1 + speed * p.stretch), thick)
             f.Rotation = math.deg(math.atan2(p.vy, p.vx))
-            f.BackgroundTransparency = 1 - p.alpha * ((k > 0.7) and (1 - k) / 0.3 or 1)
+            if p.textured then                                 -- the drop fills ~43% of its sprite's height
+                local h = thick * 2.3
+                f.Size = UDim2.fromOffset(math.max(len * 1.25, h * 1.3), h)
+                f.ImageTransparency = fade
+            else
+                f.Size = UDim2.fromOffset(len, thick)
+                f.BackgroundTransparency = fade
+            end
         end
     end
 end
@@ -986,14 +1211,26 @@ function FX.sparks(x, y, dir, count)
     end
 end
 
+-- Airborne spurt: a cone of droplets bursting from (x, y) along `angle` (radians), gone in a moment.
+local function spurt(x, y, angle, size, life)
+    if not HAS_BLOOD then return end
+    local img = sprite(ATLAS.cone, { AnchorPoint = Vector2.new(0.08, 0.5), Position = P(x, y), Size = UDim2.fromOffset(size, size), Rotation = math.deg(angle), Parent = ui.fx })
+    local sc = make("UIScale", { Scale = 0.25, Parent = img })
+    tween(sc, life, { Scale = 1.15 }, ES.Quint)
+    tween(img, life * 0.55, { ImageTransparency = 1 }, ES.Quad, ED.In, life * 0.45)
+    after(life + 0.1, function() img:Destroy() end)
+end
+
 ----------------------------------------------------------------------
--- 12. EFFECTS: stains on the lens, drips on the letters
+-- 12. EFFECTS: blots on the lens, drips on the letters
 ----------------------------------------------------------------------
 local STAINS = { count = 0 }
+local DRIPS = { list = {}, count = 0 }
+local WOUNDS = { Z = { 0.1, -0.06 }, E = { -0.3 }, R = { -0.3, 0.22 }, O = { -0.36, 0.36 } }   -- where the blade crosses each letter
 
--- A splat = overlapping lobes + satellites thrown along `dir`, optionally running down.
-function STAINS.add(xs, ys, radius, dir, runs)
-    local r = radius * view.s
+-- Shape fallback for a blot: overlapping lobes + satellites thrown along `dir`.
+local function stainShapes(xs, ys, radius, dir, runs)
+    local r = radius * view.s * 0.55
     local root = frame({ AnchorPoint = CENTER, Position = UDim2.fromScale(xs, ys), Size = UDim2.fromOffset(2, 2), Parent = ui.lens })
     local sc = make("UIScale", { Scale = 0.25, Parent = root })
     local shade = pick(SHADES)
@@ -1017,11 +1254,6 @@ function STAINS.add(xs, ys, radius, dir, runs)
         local s = rand(1, 2.2) * view.s
         blob(math.cos(a) * dist, math.sin(a) * dist, s, s, shade, 0, 0.25)
     end
-    if rng:NextNumber() < 0.35 then                        -- thin smear
-        local a = dir + rand(-0.4, 0.4)
-        local smear = blob(math.cos(a) * r * 2.2, math.sin(a) * r * 2.2, r * rand(3, 5.5), math.max(1.5, r * 0.22), shade, math.deg(a), 0.2)
-        gradient(smear, 0, nil, nseq({ 0, 0, 1, 1 }))
-    end
     blob(-r * 0.3, -r * 0.36, r * 0.3, r * 0.18, Color3.fromRGB(226, 84, 78), -30, 0.68, 2)    -- wet highlight
     if runs then
         local w = math.max(2, r * rand(0.16, 0.26))
@@ -1029,7 +1261,29 @@ function STAINS.add(xs, ys, radius, dir, runs)
         tween(run, rand(4, 8), { Size = UDim2.fromOffset(w, r * rand(2.8, 6)) }, ES.Sine, ED.Out, 0.3)
     end
     tween(sc, 0.22, { Scale = 1 }, ES.Back)
+end
+
+-- A blot of blood landing on the lens at (xs, ys), in screen fractions. `radius` is the size of its pool in
+-- reference pixels, `dir` the direction it was thrown in; `runs` lets a drip creep down from it.
+function STAINS.add(xs, ys, radius, dir, runs)
     STAINS.count += 1
+    if not HAS_BLOOD then return stainShapes(xs, ys, radius, dir, runs) end
+    local size = radius * view.s * 4.8                     -- the pool fills ~40% of its cell
+    local root = frame({ AnchorPoint = CENTER, Position = UDim2.fromScale(xs, ys), Size = UDim2.fromOffset(size, size), Parent = ui.lens })
+    local sc = make("UIScale", { Scale = 0.3, Parent = root })
+    local tone = rand(0.72, 1)
+    local tint = Color3.new(tone, tone, tone)
+    sprite(pick(ATLAS.blots), { AnchorPoint = CENTER, Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1, 1), Rotation = rand(-40, 40), ImageColor3 = tint, ImageTransparency = 0.03, ZIndex = 2, Parent = root })
+    if rng:NextNumber() < 0.55 then                        -- droplets thrown on along the flight direction
+        sprite(ATLAS.cone, { AnchorPoint = Vector2.new(0.08, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1.5, 1.5), Rotation = math.deg(dir), ImageColor3 = tint, Parent = root })
+    end
+    tween(sc, 0.16, { Scale = 1 }, ES.Back)
+    if runs then
+        after(rand(0.5, 1.4), function()
+            local w = math.max(2.4, radius * view.s * rand(0.13, 0.19))
+            DRIPS.add(root, nil, size * rand(0.42, 0.58), size * 0.55, radius * view.s * rand(2.4, 5.5), 0, rand(0.3, 0.6), w)
+        end)
+    end
 end
 
 -- Random spot on the lens that keeps the photo, title and bar readable.
@@ -1048,52 +1302,83 @@ function STAINS.burst(count, rMin, rMax, spreadTime, cx)
     end
 end
 
-local DRIPS = { list = {}, count = 0 }
-local WOUNDS = { Z = { 0.1, -0.06 }, E = { -0.3 }, R = { -0.3, 0.22 }, O = { -0.36, 0.36 } }
-
--- A drip runs down from (x, y) in `parent`, swells into a bead and sheds drops.
--- `toStage(x, y)` converts parent coordinates to stage coordinates for the falling drop.
-function DRIPS.add(parent, toStage, x, y, maxLen, cycles, speedScale)
-    local w = rand(2.6, 4.4)
-    local shade = pick(SHADES)
-    local trail = corner(frame({ AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, 0), BackgroundColor3 = WHITE, Parent = parent }))
-    gradient(trail, 90, cseq({ 0, COL.BloodDark, 1, shade }))
-    local bead = corner(frame({ AnchorPoint = CENTER, Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w + 1, w + 1), BackgroundColor3 = shade, ZIndex = 2, Parent = parent }))
-    corner(frame({ Position = UDim2.fromScale(0.22, 0.2), Size = UDim2.fromScale(0.3, 0.3), BackgroundColor3 = Color3.fromRGB(255, 150, 140), BackgroundTransparency = 0.4, Parent = bead }))
+-- A drip runs down from (x, y) in `parent`, swells into a bead and sheds drops (`cycles` of them; 0 = it only
+-- leaves a trail). `toStage(x, y)` converts parent coordinates to stage coordinates for the falling drop.
+function DRIPS.add(parent, toStage, x, y, maxLen, cycles, speedScale, width)
+    local w = width or rand(3, 5)
     local d = {
-        trail = trail, bead = bead, toStage = toStage, x = x, y = y, w = w, len = 0, max = maxLen,
+        toStage = toStage, x = x, y = y, w = w, len = 0, max = maxLen,
         speed = rand(BLOOD.DripSpeed[1], BLOOD.DripSpeed[2]) * (speedScale or 1),
         state = (maxLen > 0) and "run" or "swell", t = 0, dur = rand(0.8, 1.6), cycles = cycles, seed = rand(0, 100),
     }
+    if HAS_BLOOD then
+        -- The trail is revealed by cropping its sprite, the bead rides on the front.
+        local column = rng:NextInteger(0, 3) * 64
+        local k = w / 11                                   -- a trail is ~11 px wide inside its 64 px column
+        d.max = math.min(maxLen, (DRIP_TRAIL - 8) * k)
+        d.tip = 80 * k                                     -- bottom of the bead below the front
+        local trail = sprite({ "BloodFx", column, 512, 64, 1 }, { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(64 * k, 0), Parent = parent })
+        local bead = sprite({ "BloodFx", column, 512 + DRIP_TRAIL, 64, DRIP_BEAD }, { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(64 * k, DRIP_BEAD * k), Parent = parent })
+        function d.setLen(len)
+            trail.Size = UDim2.fromOffset(64 * k, len)
+            trail.ImageRectSize = Vector2.new(64, math.max(len / k, 1))
+            bead.Position = UDim2.fromOffset(x, y + len)
+        end
+        function d.setBead(a)                              -- 0 = resting, 1 = about to fall
+            local s = 1 + 0.34 * a
+            bead.Size = UDim2.fromOffset(64 * k * s, DRIP_BEAD * k * s)
+        end
+        function d.hideBead() bead.Visible = false end
+    else
+        local shade = pick(SHADES)
+        d.color, d.tip = shade, w
+        local trail = corner(frame({ AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, 0), BackgroundColor3 = WHITE, Parent = parent }))
+        gradient(trail, 90, cseq({ 0, COL.BloodDark, 1, shade }))
+        local bead = corner(frame({ AnchorPoint = CENTER, Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w + 1, w + 1), BackgroundColor3 = shade, ZIndex = 2, Parent = parent }))
+        corner(frame({ Position = UDim2.fromScale(0.22, 0.2), Size = UDim2.fromScale(0.3, 0.3), BackgroundColor3 = Color3.fromRGB(255, 150, 140), BackgroundTransparency = 0.4, Parent = bead }))
+        function d.setLen(len)
+            trail.Size = UDim2.fromOffset(w, len + w * 0.5)
+            bead.Position = UDim2.fromOffset(x, y + len)
+        end
+        function d.setBead(a)
+            local s = w + 1 + 3.2 * a
+            bead.Size = UDim2.fromOffset(s, s * (1 + 0.3 * a))
+        end
+        function d.hideBead() bead.Visible = false end
+    end
+    d.setLen(0)
+    d.setBead(0)
     DRIPS.list[#DRIPS.list + 1] = d
-    DRIPS.count += 1
     return d
 end
 
 function DRIPS.update(dt)
     local list = DRIPS.list
+    local function drop(i)
+        list[i] = list[#list]
+        list[#list] = nil
+    end
     for i = #list, 1, -1 do
         local d = list[i]
         if d.state == "run" then
             -- stick-slip: blood creeps, hesitates, creeps again
             local v = d.speed * (0.35 + 1.3 * clamp(0.5 + math.noise(S.clock * 0.9, d.seed), 0, 1))
             d.len = math.min(d.max, d.len + v * dt)
-            d.trail.Size = UDim2.fromOffset(d.w, d.len + d.w * 0.5)
-            d.bead.Position = UDim2.fromOffset(d.x, d.y + d.len)
-            if d.len >= d.max then d.state, d.t = "swell", 0 end
+            d.setLen(d.len)
+            if d.len >= d.max then
+                if d.cycles > 0 then d.state, d.t = "swell", 0 else drop(i) end
+            end
         elseif d.state == "swell" then
             d.t += dt
             local a = math.min(d.t / d.dur, 1)
-            local s = d.w + 1 + 3.2 * a * a
-            d.bead.Size = UDim2.fromOffset(s, s * (1 + 0.3 * a))
+            d.setBead(a * a)
             if a >= 1 then
-                local sx, sy = d.toStage(d.x, d.y + d.len + s * 0.5)
-                FX.emit(sx, sy, 0, 40, { size = d.w + 1.6, life = 1.5, gravity = 1300, drag = 0, stretch = 0.0034, color = d.bead.BackgroundColor3 })
-                d.bead.Size = UDim2.fromOffset(d.w + 0.5, d.w + 0.5)
+                local sx, sy = d.toStage(d.x, d.y + d.len + d.tip)
+                FX.emit(sx, sy, 0, 40, { size = d.w + 1.6, life = 1.5, gravity = 1300, drag = 0, stretch = 0.0034, color = d.color })
+                d.setBead(0)
                 d.cycles -= 1
                 if d.cycles <= 0 then
-                    list[i] = list[#list]
-                    list[#list] = nil
+                    drop(i)
                 else
                     d.state, d.t, d.dur = "rest", rand(1.4, 3.8), rand(0.9, 2)
                 end
@@ -1105,6 +1390,11 @@ function DRIPS.update(dt)
     end
 end
 
+-- Letter coordinates of the blade's lower edge where it crosses the letter at local x.
+local function woundY(L, x)
+    return CONFIG.TitleSize / 2 + (BLADE_Y - TITLE_Y) + KATANA.lowerY(SX * (L.x - L.w / 2 + x - KATANA.tipX))
+end
+
 -- Drip on a letter: from the blade wound down the face, or a bead hanging under the letter.
 function DRIPS.onLetter(L, speedScale)
     local size = CONFIG.TitleSize
@@ -1112,13 +1402,26 @@ function DRIPS.onLetter(L, speedScale)
         return L.x + L.ox - L.w / 2 + x, TITLE_Y + L.oy - size / 2 + y
     end
     local bottom = size / 2 + CAP_H / 2
+    DRIPS.count += 1
     if rng:NextNumber() < 0.68 then
         local sites = WOUNDS[string.upper(L.ch)] or { -0.25, 0.25 }
         local x = L.w / 2 + (pick(sites) + rand(-0.03, 0.03)) * L.w
-        local y = size / 2 + (BLADE_Y - TITLE_Y) + KATANA.bladeH * 0.35
+        local y = woundY(L, x) - 2
         DRIPS.add(L.fx, toStage, x, y, bottom - y + rand(4, 26), rng:NextInteger(1, 3), speedScale)
     else
         DRIPS.add(L.fx, toStage, L.w / 2 + rand(-0.3, 0.3) * L.w, bottom - 3, rand(6, 22), rng:NextInteger(1, 2), speedScale)
+    end
+end
+
+-- Blood welling out of a letter where the blade passes through it.
+local function woundSplat(L, scale)
+    if not HAS_BLOOD then return end
+    for _, site in ipairs(WOUNDS[string.upper(L.ch)] or { -0.25, 0.25 }) do
+        local x = L.w / 2 + site * L.w
+        local s = CONFIG.TitleSize * scale * rand(0.8, 1.15)
+        local img = sprite(pick(ATLAS.blots), { AnchorPoint = CENTER, Position = UDim2.fromOffset(x, woundY(L, x) - KATANA.bladeH * 0.4), Size = UDim2.fromOffset(s, s), Rotation = rand(-40, 40), ZIndex = 3, Parent = L.fx })
+        local sc = make("UIScale", { Scale = 0.2, Parent = img })
+        tween(sc, 0.14, { Scale = 1 }, ES.Back)
     end
 end
 
