@@ -1,0 +1,4 @@
+# Keep Windows scripts and texts byte-for-byte (CRLF, UTF-8 BOM) as shipped
+*.bat -text
+*.ps1 -text
+*.txt -text
