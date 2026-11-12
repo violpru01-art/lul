@@ -16,7 +16,14 @@
 
     Stages:
         fade in -> photo -> title -> katana strike (half way) -> loading
-        -> final thrust at 100% -> blood covers the screen -> fade out
+        -> final thrust at 100% -> blood floods the screen -> fade out
+
+    The katana and all blood are drawn from four PNG textures (the assets/
+    folder next to this script). An executor downloads them once, keeps them
+    in its workspace and reuses them on later runs; the script yields while
+    that happens. See CONFIG.Textures to host them elsewhere or to use images
+    uploaded to Roblox. Without textures the intro still runs, with simple
+    shapes instead.
 ]]
 
 local OVERRIDES = ...
@@ -62,7 +69,7 @@ local CONFIG = {
         FinalHold    = 0.5,   -- pause at 100% before the final thrust
         FinalWindup  = 0.28,
         FinalThrust  = 0.11,
-        BloodCover   = 2.6,   -- time for blood to cover the whole screen
+        BloodCover   = 1.6,   -- time for blood to flood the whole screen
         EndHold      = 0.4,
         FadeToBlack  = 0.7,
         FadeOut      = 0.8,
@@ -82,16 +89,17 @@ local CONFIG = {
     },
 
     Blood = {
-        SplashCount      = 38,
+        SplashCount      = 38,   -- droplets thrown by the first strike
         FinalSplashCount = 90,
-        ImpactStains     = 5,
-        MaxStains        = 11,   -- stains on the "lens" while loading
-        FinalStains      = 14,
+        ImpactStains     = 4,    -- blots that land on the "lens" at the strike
+        MaxStains        = 9,    -- lens blots in total while loading
+        FinalStains      = 6,
         MaxDrips         = 11,   -- drips running down the letters
         DripSpeed        = { 7, 16 },
-        CoverColumns     = 15,
-        CoverBlobs       = 8,
-        PoolSize         = 130,  -- pooled droplet / spark frames
+        CoverBlots       = 15,   -- big blots that flood the screen at the end
+        CoverColumns     = 15,   -- (shape fallback only)
+        CoverBlobs       = 8,    -- (shape fallback only)
+        PoolSize         = 130,  -- pooled flying droplets
     },
 
     Atmosphere = {
@@ -105,6 +113,18 @@ local CONFIG = {
 
     -- Optional sound ids ("rbxassetid://..."); empty = silent
     Sounds = { Thud = "", Whoosh = "", Impact = "", Final = "", Volume = 0.6 },
+
+    -- Katana and blood textures
+    Textures = {
+        Enabled = true,          -- false: always use the simple shapes
+        BaseUrl = "https://raw.githubusercontent.com/violpru01-art/lul/HEAD/assets/",
+        Folder  = "ZeroIntro",   -- cache folder inside the executor workspace
+        Version = 1,             -- change after replacing the files to force a new download
+        Timeout = 10,            -- seconds to wait for downloads before falling back to shapes
+        Files   = { Katana = "zero_katana.png", BlotsA = "zero_blots_a.png", BlotsB = "zero_blots_b.png", BloodFx = "zero_blood_fx.png" },
+        -- Images uploaded to Roblox take priority over downloads, e.g. Ids = { Katana = "rbxassetid://123" }
+        Ids     = {},
+    },
 
     Colors = {
         BgTop       = Color3.fromRGB(13, 5, 7),
@@ -343,6 +363,111 @@ local function layer(z, name)
     return frame({ Name = name, Size = UDim2.fromScale(1, 1), ZIndex = z, Parent = gui })
 end
 
+-- Black curtain first: it hides everything while textures load and the scene is built.
+ui.fade = frame({ Name = "Fade", Size = UDim2.fromScale(1, 1), BackgroundColor3 = BLACK, BackgroundTransparency = 1, ZIndex = 13, Parent = gui })
+tween(ui.fade, 0.35, { BackgroundTransparency = 0 }, ES.Quad)
+
+----------------------------------------------------------------------
+-- 5. TEXTURES (katana + blood; downloaded once, then read from the cache)
+----------------------------------------------------------------------
+local TEX = {}
+do
+    local cfg = CONFIG.Textures
+    local toAsset = getcustomasset or getsynasset
+    local canCache = toAsset ~= nil and writefile ~= nil and isfile ~= nil
+
+    local function httpGet(url)
+        local ok, body = pcall(function() return game:HttpGet(url) end)
+        if ok and typeof(body) == "string" then return body end
+        local send = request or http_request or (syn and syn.request)
+        if send then
+            local res = send({ Url = url, Method = "GET" })
+            if typeof(res) == "table" and res.StatusCode == 200 then return res.Body end
+        end
+        return nil
+    end
+
+    local function resolve(key, file)
+        local id = cfg.Ids[key]
+        if typeof(id) == "string" and id ~= "" then return id end      -- image uploaded to Roblox
+        if not canCache then return nil end
+        local path = cfg.Folder .. "/v" .. tostring(cfg.Version) .. "_" .. file
+        if not isfile(path) then
+            if makefolder then pcall(makefolder, cfg.Folder) end
+            local data = httpGet(cfg.BaseUrl .. file)
+            -- an error page must never end up in the cache as a "texture"
+            if typeof(data) ~= "string" or #data < 1024 or data:sub(2, 4) ~= "PNG" then return nil end
+            writefile(path, data)
+        end
+        return toAsset(path)
+    end
+
+    if cfg.Enabled then
+        local found, pending, open = {}, 0, true
+        for key, file in pairs(cfg.Files) do
+            pending += 1
+            task.spawn(function()
+                local ok, asset = pcall(resolve, key, file)
+                if open and ok and typeof(asset) == "string" and asset ~= "" then found[key] = asset end
+                pending -= 1
+            end)
+        end
+        -- a pulsing kanji shows the script is alive if the first download is slow
+        local started, deadline = os.clock(), os.clock() + cfg.Timeout
+        local sign
+        while pending > 0 and os.clock() < deadline do
+            if not sign and os.clock() - started > 0.6 then
+                sign = label({ AnchorPoint = CENTER, Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(80, 80), Text = CONFIG.Kanji, TextSize = 44, Font = FONT.Kanji, TextColor3 = COL.Blood, TextTransparency = 1, Parent = ui.fade })
+                loopTween(sign, 0.9, { TextTransparency = 0.25 }, ES.Sine, true)
+            end
+            task.wait()
+        end
+        open = false                                       -- a late download only fills the cache for next time
+        if sign then sign:Destroy() end
+        for key, asset in pairs(found) do TEX[key] = asset end
+
+        local list = {}
+        for _, asset in pairs(TEX) do list[#list + 1] = asset end
+        if #list > 0 then                                  -- decode before the first frame that shows them
+            local done = false
+            task.spawn(function()
+                pcall(function() game:GetService("ContentProvider"):PreloadAsync(list) end)
+                done = true
+            end)
+            local limit = os.clock() + 3
+            while not done and os.clock() < limit do task.wait() end
+        end
+        if #list < 4 then warn("[ZeroIntro] textures unavailable (" .. #list .. "/4 loaded), missing parts use simple shapes") end
+    end
+end
+local HAS_KATANA = TEX.Katana ~= nil
+local HAS_BLOOD = TEX.BlotsA ~= nil and TEX.BlotsB ~= nil and TEX.BloodFx ~= nil
+
+-- Sprite rectangles inside the atlases: { texture, x, y, width, height } (see tools/gen_blood.py).
+local ATLAS = {
+    blots  = {},                                   -- 8 impact blots, 512 px cells
+    spray  = { "BloodFx", 0, 0, 512, 512 },        -- droplets thrown all around a point
+    cone   = { "BloodFx", 512, 0, 512, 512 },      -- droplets flying along +X from the left edge
+    streak = { "BloodFx", 256, 512, 256, 128 },    -- one flying drop, head on the right
+    bleed  = { "BloodFx", 512, 512, 512, 512 },    -- soft soaking blot
+    blade  = { "Katana", 0, 0, 1024, 128 },
+    coat   = { "Katana", 0, 128, 1024, 128 },      -- blood lying on the blade
+    hilt   = { "Katana", 0, 256, 512, 256 },
+}
+for i = 0, 7 do
+    ATLAS.blots[i + 1] = { (i < 4) and "BlotsA" or "BlotsB", (i % 2) * 512, (math.floor(i / 2) % 2) * 512, 512, 512 }
+end
+local DRIP_TRAIL, DRIP_BEAD = 384, 128             -- a drip column: 64 px wide, trail rows then the hanging bead
+
+local function sprite(def, props)
+    props.BackgroundTransparency = 1
+    props.BorderSizePixel = 0
+    props.Image = TEX[def[1]]
+    props.ImageRectOffset = Vector2.new(def[2], def[3])
+    props.ImageRectSize = Vector2.new(def[4], def[5])
+    return make("ImageLabel", props)
+end
+
 ----------------------------------------------------------------------
 -- 5. SCHEDULER (scene clock: honours Speed, hit-stop and cleanup)
 ----------------------------------------------------------------------
@@ -477,7 +602,6 @@ do
 
     ui.flashRed   = frame({ Size = UDim2.fromScale(1, 1), BackgroundColor3 = COL.BloodBright, BackgroundTransparency = 1, ZIndex = 11, Parent = gui })
     ui.flashWhite = frame({ Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 1, ZIndex = 12, Parent = gui })
-    ui.fade       = frame({ Size = UDim2.fromScale(1, 1), BackgroundColor3 = BLACK, BackgroundTransparency = 1, ZIndex = 13, Parent = gui })
     ui.skip       = make("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 14, Parent = gui })
 end
 
