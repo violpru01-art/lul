@@ -1,0 +1,9 @@
+# Created on the user's PC by START.bat - config.json and URL.txt contain the secret key
+config.json
+URL.txt
+latin.flag
+.venv/
+logs/
+tools/
+workspace/
+__pycache__/
